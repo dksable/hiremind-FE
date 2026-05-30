@@ -1,3 +1,3 @@
-# Welcome to your Lovable project
+# Hiremind Frontend
 
-TODO: Document your project here
+React + Vite frontend for the Hiremind ATS and resume screening app.
