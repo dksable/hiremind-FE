@@ -26,15 +26,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (raw) {
       try { setUser(JSON.parse(raw)); } catch { /* ignore */ }
     }
-    if (getToken()) {
-      api.auth.me()
+    const restoreSession = async () => {
+      if (!getToken()) await api.auth.refresh();
+      if (!getToken()) return;
+
+      await api.auth.me()
         .then(({ user }) => {
           setUser(user);
           localStorage.setItem(KEY, JSON.stringify(user));
           if (user.role === "admin") refreshUsers();
         })
         .catch(logout);
-    }
+    };
+
+    restoreSession().catch(logout);
   }, []);
 
   async function refreshUsers() {
@@ -55,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   function logout() {
+    api.auth.logout().catch(() => undefined);
     clearToken();
     localStorage.removeItem(KEY);
     setUser(null);

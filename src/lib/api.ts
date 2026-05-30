@@ -205,6 +205,7 @@ export type ScreeningAnalysis = Pick<
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
 const TOKEN_KEY = "hiremind_token";
+let refreshPromise: Promise<string | null> | null = null;
 
 export function apiUrl(path: string) {
   return `${API_URL}${path}`;
@@ -222,7 +223,30 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function refreshAccessToken() {
+  if (!refreshPromise) {
+    refreshPromise = fetch(apiUrl("/api/auth/refresh"), {
+      method: "POST",
+      credentials: "include",
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          clearToken();
+          return null;
+        }
+        const data = await response.json() as { token: string };
+        setToken(data.token);
+        return data.token;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+
+  return refreshPromise;
+}
+
+async function request<T>(path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
   const headers = new Headers(options.headers);
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -230,9 +254,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   let response: Response;
   try {
-    response = await fetch(apiUrl(path), { ...options, headers });
+    response = await fetch(apiUrl(path), { ...options, headers, credentials: "include" });
   } catch {
     throw new Error("Unable to reach the server. Please check that the backend is running and try again.");
+  }
+  if (response.status === 401 && allowRefresh && path !== "/api/auth/login" && path !== "/api/auth/refresh") {
+    const refreshedToken = await refreshAccessToken();
+    if (refreshedToken) return request<T>(path, options, false);
   }
   if (!response.ok) {
     const data = await response.json().catch(() => ({} as { error?: string }));
@@ -258,10 +286,15 @@ export const api = {
       return data;
     },
     me: () => request<{ user: User }>("/api/auth/me"),
+    refresh: () => refreshAccessToken(),
+    logout: () => request<void>("/api/auth/logout", { method: "POST" }, false).finally(clearToken),
     register: (payload: ManagedUser) =>
       request<{ token: string; user: User }>("/api/auth/register", {
         method: "POST",
         body: JSON.stringify(payload),
+      }).then((data) => {
+        setToken(data.token);
+        return data;
       }),
   },
   users: {
