@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { api, type Candidate, type CandidatePagination, type CandidateSortBy, type SortOrder } from "@/lib/api";
+import { api, type Candidate, type CandidatePagination, type CandidateSortBy, type Job, type SortOrder } from "@/lib/api";
 import { extractTextFromFile } from "@/lib/fileParser";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,6 +47,7 @@ function recColor(rec: string | null) {
 
 const SCREENER_JOB_STORAGE_KEY = "hiremind_screener_job_id";
 const AI_SCREENING_FALLBACK_MESSAGE = "AI screening failed. Please try again or review manually.";
+const CREATE_NEW_JOB_VALUE = "__create_new_job__";
 
 const candidateSortOptions: Array<{ value: CandidateSortBy; label: string }> = [
   { value: "created_at", label: "Newest" },
@@ -78,6 +79,9 @@ export default function Screener() {
   const canEdit = user?.role !== "viewer";
   const [jdText, setJdText] = useState("");
   const [jdTitle, setJdTitle] = useState("");
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [selectedExistingJobId, setSelectedExistingJobId] = useState<string | null>(null);
   const [cvFiles, setCvFiles] = useState<File[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -120,6 +124,49 @@ export default function Screener() {
     setPagination(result.pagination);
   }
 
+  async function loadJobs() {
+    setJobsLoading(true);
+    try {
+      const rows = await api.jobs.list();
+      setJobs(rows);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to load existing jobs");
+    } finally {
+      setJobsLoading(false);
+    }
+  }
+
+  function isActiveJob(job: Job) {
+    return ["ongoing", "in_progress"].includes(job.current_position_status);
+  }
+
+  const activeJobs = useMemo(() => jobs.filter(isActiveJob), [jobs]);
+  const selectedExistingJob = useMemo(
+    () => activeJobs.find((job) => job.id === selectedExistingJobId) || null,
+    [activeJobs, selectedExistingJobId],
+  );
+
+  function selectExistingJob(value: string) {
+    if (value === CREATE_NEW_JOB_VALUE) {
+      setSelectedExistingJobId(null);
+      return;
+    }
+
+    const selected = activeJobs.find((job) => job.id === value);
+    if (!selected) return;
+
+    setSelectedExistingJobId(selected.id);
+    setJdTitle(selected.title);
+    setJdText(selected.description);
+    setJobId(selected.id);
+    setPage(1);
+    localStorage.setItem(SCREENER_JOB_STORAGE_KEY, selected.id);
+  }
+
+  useEffect(() => {
+    loadJobs();
+  }, []);
+
   useEffect(() => {
     if (jobId) loadCandidates(jobId);
   }, [jobId, page, filter, debouncedSearch, sortBy, sortOrder]);
@@ -137,6 +184,7 @@ export default function Screener() {
       const text = await extractTextFromFile(file);
       setJdText(text);
       if (!jdTitle) setJdTitle(file.name.replace(/\.[^.]+$/, ""));
+      if (selectedExistingJobId) setSelectedExistingJobId(null);
     } catch (e) {
       toast.error("Could not read JD file");
     }
@@ -151,8 +199,9 @@ export default function Screener() {
     setProgress({ done: 0, total: cvFiles.length });
 
     try {
-      // Create job
-      const job = await api.jobs.create({ title: jdTitle || "Untitled Job", description: jdText });
+      const job = selectedExistingJobId
+        ? { id: selectedExistingJobId }
+        : await api.jobs.create({ title: jdTitle || "Untitled Job", description: jdText });
 
       // Process CVs in parallel (small batches)
       const results: Candidate[] = [];
@@ -298,10 +347,41 @@ export default function Screener() {
                 <CardTitle className="flex items-center gap-2"><FileText className="h-5 w-5" /> Job Description</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Existing active job</Label>
+                  <Select
+                    value={selectedExistingJobId || undefined}
+                    onValueChange={selectExistingJob}
+                    disabled={jobsLoading || analyzing}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select existing active job" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={CREATE_NEW_JOB_VALUE}>Create new job instead</SelectItem>
+                      {activeJobs.map((job) => (
+                        <SelectItem key={job.id} value={job.id}>{job.title}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedExistingJob ? (
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                      <span>Selected job:</span>
+                      <Badge variant="secondary">{selectedExistingJob.title}</Badge>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Select an existing active job to reuse its JD, or create a new job below.
+                    </p>
+                  )}
+                </div>
                 <Input
                   placeholder="Job title (e.g. Senior Frontend Engineer)"
                   value={jdTitle}
-                  onChange={(e) => setJdTitle(e.target.value)}
+                  onChange={(e) => {
+                    setJdTitle(e.target.value);
+                    if (selectedExistingJobId) setSelectedExistingJobId(null);
+                  }}
                 />
                 <label className="flex items-center justify-center border-2 border-dashed rounded-lg p-6 cursor-pointer hover:bg-accent transition">
                   <input
@@ -318,7 +398,10 @@ export default function Screener() {
                 <Textarea
                   placeholder="…or paste the job description here"
                   value={jdText}
-                  onChange={(e) => setJdText(e.target.value)}
+                  onChange={(e) => {
+                    setJdText(e.target.value);
+                    if (selectedExistingJobId) setSelectedExistingJobId(null);
+                  }}
                   rows={8}
                 />
               </CardContent>
